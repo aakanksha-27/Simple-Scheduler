@@ -13,20 +13,17 @@ int NCPU;
 int TSLICE;
 int shmid;
 
-struct processQueue* schedulerQ;
-struct processQueue shellQ;
-struct processQueue* terminatedQ;
-
 sem_t schedulerSem;
+sem_t processQueueLock;
 
 typedef struct {
     char cmd[1024];
     pid_t pid;
     bool background;
-    time_t startTime;
-    time_t endTime;
-    time_t execTime;
-    time_t waitTime;
+    timespec startTime;
+    timespec endTime;
+    timespec execTime;
+    timespec waitTime;
     int state; //0-running, 1-waiting, -1-finish
     int priority;
 } process;
@@ -36,8 +33,8 @@ typedef struct {
     int rear = 0;
 } processQueue
 
-process history[200];
-int historyCnt = 0;
+struct processQueue schedulerQ;
+struct processQueue terminatedQ;
 
 static void my_handler(int signum);
 void setupSignalHandler();
@@ -46,15 +43,13 @@ void read_user_input(char* input);
 int launch (char* command , int status);
 void trimWhiteSpace(char *str);
 int create_process_and_run(char* cmd, int bg);
-void terminateHistory();
-void showHistory();
 
 void enqueue(struct processQueue* q, struct process p){
-    if (q.rear == 200){
+    if (q.rear == 199){
         perror("Error: Queue is full.")
         exit(0);
     }
-    q.processes[q.rear++] = p;
+    q.processes[q.rear] = p;
 }
 
 void printTermination(){
@@ -76,6 +71,43 @@ static void my_handler(int signum) { // signal handler for SIGINT
             exit(0);
         }
     }
+    else if (signum == SIGUSR1) { // Signal the scheduler to wake up
+        sem_post(&scheduler_sem);
+    }
+    else if (signum == SIGCHLD) {
+        int status;
+        int pid;
+        while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+            sem_wait(&processQueueLock);
+            for (int i = 0; i <= schedulerQ.rear; i++) {
+                if (schedulerQ.processes[i].pid == pid) {
+
+                    schedulerQ.processes[i].state = -1;
+
+                    clock_gettime(CLOCK_MONOTONIC, &schedulerQ.processes[i].endTime);
+                    duration.tv_sec = schedulerQ.processes[i].endTime.tv_sec - schedulerQ.processes[i].startTime.tv_sec;
+                    duration.tv_nsec = schedulerQ.processes[i].endTime.tv_nsec - schedulerQ.processes[i].startTime.tv_nsec;
+
+                    if (duration.tv_nsec < 0) {
+                        duration.tv_sec --;
+                        duration.tv_nsec += 1000000000;
+                    }
+                    long long dur = duration.tv_sec * 1000 + duration.tv_nsec / 1000000;
+
+                    schedulerQ.processes[i].execTime += dur;
+                    schedulerQ.processes[i].waitTime += dur;
+
+                    terminatedQ.processes[++terminatedQ.rear] = schedulerQ.processes[i];
+                    for (int j = i; j < schedulerQ.rear; j++) {
+                        schedulerQ.processes[j] = schedulerQ.processes[j+1];
+                    }
+                    schedulerQ.rear--;
+                    break;
+                }
+            }
+            sem_post(&processQueueLock);
+        }
+    }
 }
 
 void setupSignalHandler() {
@@ -92,13 +124,7 @@ void shell_loop() { // for infinite loop running
     do {
         printf("group_48@aakanksha_palak:~$ ");
         read_user_input(input);
-        char* pipe = strchr(input, '|');
-
-        if (pipe != NULL) {
-            status = pipe_command(input);
-        } else {
-            status = launch(input, status);
-        }
+        status = launch(input, status);
     } while (status);
 }
 
@@ -111,7 +137,8 @@ void read_user_input(char* input) {  // take input
                 break;
             }
         }
-    } else {
+    } 
+    else {
         perror("Error: Unable to take input ");
         exit(0);
     }
@@ -119,11 +146,8 @@ void read_user_input(char* input) {  // take input
 
 int launch(char* command, int status) { // launches non piped commands
     if (strcmp(command, "exit") == 0) {
-        terminateHistory();
         printf("Shell ended");
         return 0;
-    } else if (strcmp(command, "history") == 0) {
-        showHistory();
     }
     else if (strcmp(command[0], "submit") == 0){
 
@@ -182,7 +206,8 @@ int create_process_and_run(char* cmd, int bg) {  // create and run child process
             perror("Error: Execution Error");
             exit(1);
         }
-    } else {
+    }
+    else {
         int pid;
         if (!bg) {
             int status;
@@ -192,33 +217,8 @@ int create_process_and_run(char* cmd, int bg) {  // create and run child process
                 exit(1);
             }
         }
-
-        if (historyCnt < 200) {
-            strncpy(history[historyCnt].cmd, cmd, sizeof(history[historyCnt].cmd) - 1);
-            history[historyCnt].cmd[sizeof(history[historyCnt].cmd) - 1] = '\0';
-            history[historyCnt].pid = pid;
-            history[historyCnt].background = bg;
-            time(&history[historyCnt].execTime);
-            historyCnt++;
-        } else {
-            perror("Error: History Full.");
-        }
     }
     return 1;
-}
-
-void terminateHistory() {  // history
-    printf("Command History:\n");
-    for (int i = 0; i < historyCnt; i++) {
-        printf("%d: %s\n", history[i].pid, history[i].cmd);
-        if (history[i].background) printf("In Background\n");
-        else printf("Execution duration: %ld ms\n", time(NULL) - history[i].execTime);
-    }
-}
-
-void showHistory() {
-    printf("Command History:\n");
-    for (int i = 0; i < historyCnt; i++) printf("%s\n", history[i].cmd);
 }
 
 int main() {
