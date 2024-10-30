@@ -37,8 +37,8 @@ typedef struct processQueue {
     int rear;
 } processQueue;
 
-processQueue *schedulerQ;
-processQueue terminatedQ;
+processQueue *schedulerQ;  //Scheduler Queue
+processQueue terminatedQ;  //Terminated Queue
 
 static void my_handler(int signum);
 void setupSignalHandler();
@@ -48,7 +48,7 @@ int launch (char* command , int status);
 void trimWhiteSpace(char *str);
 int create_process_and_run(char* cmd, int bg);
 
-void enqueue(struct processQueue* q, struct process p){
+void enqueue(struct processQueue* q, struct process p){  // Add to the queue
     if (q->rear == 200){
         perror("Error: Queue is full.");
         exit(0);
@@ -56,7 +56,7 @@ void enqueue(struct processQueue* q, struct process p){
     q->processes[q->rear++] = p;
 }
 
-void printTermination(){
+void printTermination(){  //Printing details of processess after termination
     processQueue* q = &terminatedQ;
     for (int i = 0; i < q->rear; i++){
         printf("%s %d Completion time: %lld ms Waiting time: %lld ms \n", q->processes[i].cmd, q->processes[i].pid, q->processes[i].endTime, q->processes[i].waitTime);
@@ -65,7 +65,7 @@ void printTermination(){
 
 static void my_handler(int signum) { // signal handler for SIGINT
     static int counter = 0;
-    if (signum == SIGINT) {
+    if (signum == SIGINT) {  //handling SIGINT
         char buff1[23] = "\nCaught SIGINT signal\n";
         write(STDOUT_FILENO, buff1, 23);
         if (counter++ == 1) {
@@ -113,7 +113,7 @@ static void my_handler(int signum) { // signal handler for SIGINT
     }
 }
 
-void setupSignalHandler() {
+void setupSignalHandler() {  //Setting up signal handler
     struct sigaction sig;
     memset(&sig, 0, sizeof(sig));
     sig.sa_handler = my_handler;
@@ -155,7 +155,7 @@ int launch(char* command, int status) { // launches non piped commands
         return 0;
     }else if (strncmp(command, "submit",6) == 0) {
         char *cmd = command + 7;
-        trimWhiteSpace(cmd);
+        trimWhiteSpace(cmd); //removing white spaces
         int pid = create_process_and_run(cmd, 0);
         if (pid < 0) {
             perror("Error: Failed to launch process");
@@ -254,7 +254,7 @@ int main() {
       exit(0);
     }
 
-    setupSignalHandler();
+    setupSignalHandler(); //setting up the signal handler
 
     shmid = shmget(IPC_PRIVATE, sizeof(struct processQueue), 0666 | IPC_CREAT); // Create shared memory
     if (shmid < 0 ) {
@@ -282,8 +282,8 @@ int main() {
             sem_wait(&schedulerSem); // Wait for a signal to proceed
             sem_wait(&processQueueLock);
 
-            int activeProcesses = NCPU;
-            int priorityLevel = 0;
+            int activeProcesses = NCPU;  //number of cpus
+            int priorityLevel = 0; //priority
 
             for (int i = 0; i <= schedulerQ->rear && activeProcesses > 0; i++) {
                 if (schedulerQ->processes[i].state == 1 &&
@@ -293,7 +293,7 @@ int main() {
                     schedulerQ->processes[i].state = 0;  // Running
 
                     activeProcesses--; // Deduct from the count of available CPUs and set priority level
-                    priorityLevel = schedulerQ->processes[i].priority;
+                    priorityLevel = schedulerQ->processes[i].priority; //set priority
 
                     int adjustedTimeSlice = (priorityLevel != 0) ? TSLICE / priorityLevel : TSLICE; // Adjust TSLICE based on priority
                     usleep(adjustedTimeSlice * 1000);
@@ -314,10 +314,9 @@ int main() {
         }
     }
     else{
-        shell_loop();
+        shell_loop(); //running the shell
     }
-
-    printTermination();
+    printTermination(); //printing the termination queue
 
     if (shmdt(schedulerQ) == -1 || shmctl(shmid, IPC_RMID, NULL) == -1) {
         perror("Error: Couldn't Release Shared Memory");
