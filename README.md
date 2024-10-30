@@ -16,6 +16,7 @@ gcc -o scheduler scheduler.c -lrt -pthread
 Contributions
 --------------
 Aakanksha (2023004): Signal handling, Semaphore handling, Error handling
+
 Palak Yadav (2023363): Process scheduling, Submit command handling, Error handling
 
 Github Repository Link
