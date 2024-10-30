@@ -8,6 +8,10 @@
 #include <time.h>
 #include <ctype.h>
 #include <stdbool.h>
+#include <semaphore.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+
 
 int NCPU;
 int TSLICE;
@@ -16,29 +20,25 @@ int shmid;
 sem_t schedulerSem;
 sem_t processQueueLock;
 
-sem_init(&schedulerSem, 0, 0);
-sem_init(&processQueueLock, 0, 1);
-
-
-typedef struct {
+typedef struct process {
     char cmd[1024];
     pid_t pid;
     bool background;
-    timespec startTime;
-    timespec endTime;
-    timespec execTime;
-    timespec waitTime;
-    int state; //0-running, 1-waiting, -1-finish
+    struct timespec startTime;
+    struct timespec endTime;
+    long long execTime;
+    long long waitTime;
+    int state; // 0-running, 1-waiting, -1-finish
     int priority;
 } process;
 
-typedef struct {
+typedef struct processQueue {
     struct process processes[200];
-    int rear = 0;
+    int rear;
 } processQueue;
 
-struct processQueue schedulerQ;
-struct processQueue terminatedQ;
+processQueue *schedulerQ;
+processQueue terminatedQ;
 
 static void my_handler(int signum);
 void setupSignalHandler();
@@ -49,17 +49,17 @@ void trimWhiteSpace(char *str);
 int create_process_and_run(char* cmd, int bg);
 
 void enqueue(struct processQueue* q, struct process p){
-    if (q.rear == 199){
+    if (q->rear == 200){
         perror("Error: Queue is full.");
         exit(0);
     }
-    q.processes[q.rear++] = p;
+    q->processes[q->rear++] = p;
 }
 
 void printTermination(){
-    struct processQueue* q = terminatedQ;
-    for (int i = 0; i < q.rear; i++){
-        printf("%s %d Completion time: %lld ms Waiting time: %lld ms \n", q.processes[i].cmd, q.processes[i].pid, q.processes[i].endTime, q.processes[i].waitTime);
+    processQueue* q = &terminatedQ;
+    for (int i = 0; i < q->rear; i++){
+        printf("%s %d Completion time: %lld ms Waiting time: %lld ms \n", q->processes[i].cmd, q->processes[i].pid, q->processes[i].endTime, q->processes[i].waitTime);
     }
 }
 
@@ -68,9 +68,10 @@ static void my_handler(int signum) { // signal handler for SIGINT
     if (signum == SIGINT) {
         char buff1[23] = "\nCaught SIGINT signal\n";
         write(STDOUT_FILENO, buff1, 23);
-        if (++counter == 2) {
+        if (counter++ == 1) {
             char buff2[20] = "Cannot handle more\n";
             write(STDOUT_FILENO, buff2, 20);
+            printTermination();
             exit(0);
         }
     }
@@ -80,31 +81,30 @@ static void my_handler(int signum) { // signal handler for SIGINT
     else if (signum == SIGCHLD) {
         int status;
         int pid;
-        struct timespec duration;
-        
         while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
             sem_wait(&processQueueLock);
-            for (int i = 0; i <= schedulerQ.rear; i++) {
-                if (schedulerQ.processes[i].pid == pid) {
+            for (int i = 0; i <= schedulerQ->rear; i++) {
+                if (schedulerQ->processes[i].pid == pid) {
 
-                    schedulerQ.processes[i].state = -1;
+                    schedulerQ->processes[i].state = -1;
 
-                    clock_gettime(CLOCK_MONOTONIC, &schedulerQ.processes[i].endTime);
-                    duration.tv_sec = schedulerQ.processes[i].endTime.tv_sec - schedulerQ.processes[i].startTime.tv_sec;
-                    duration.tv_nsec = schedulerQ.processes[i].endTime.tv_nsec - schedulerQ.processes[i].startTime.tv_nsec;
+                    clock_gettime(CLOCK_MONOTONIC, &schedulerQ->processes[i].endTime);
+                    struct timespec duration;
+                    duration.tv_sec = schedulerQ->processes[i].endTime.tv_sec - schedulerQ->processes[i].startTime.tv_sec;
+                    duration.tv_nsec = schedulerQ->processes[i].endTime.tv_nsec - schedulerQ->processes[i].startTime.tv_nsec;
 
                     if (duration.tv_nsec < 0) {
-                        duration.tv_sec --;
+                        duration.tv_sec--;
                         duration.tv_nsec += 1000000000;
                     }
-                    schedulerQ.processes[i].execTime = duration.tv_sec * 1000 + duration.tv_nsec / 1000000;
-                    schedulerQ.processes[i].waitTime += schedulerQ.processes[i].execTime;
+                    schedulerQ->processes[i].execTime = duration.tv_sec * 1000 + duration.tv_nsec / 1000000;
+                    schedulerQ->processes[i].waitTime += schedulerQ->processes[i].execTime;
 
-                    terminatedQ.processes[++terminatedQ.rear] = schedulerQ.processes[i];
-                    for (int j = i; j < schedulerQ.rear; j++) {
-                        schedulerQ.processes[j] = schedulerQ.processes[j+1];
+                    terminatedQ.processes[++terminatedQ.rear] = schedulerQ->processes[i];
+                    for (int j = i; j < schedulerQ->rear; j++) {
+                        schedulerQ->processes[j] = schedulerQ->processes[j+1];
                     }
-                    schedulerQ.rear--;
+                    schedulerQ->rear--;
                     break;
                 }
             }
@@ -119,13 +119,15 @@ void setupSignalHandler() {
     sig.sa_handler = my_handler;
 
     sigaction(SIGINT, &sig, NULL);
+    sigaction(SIGUSR1, &sig, NULL);
+    sigaction(SIGCHLD, &sig, NULL);
 }
 
 void shell_loop() { // for infinite loop running
     int status = 1;
     char input[1024];
     do {
-        printf("group_48@aakanksha_palak:~$ ");
+        printf("\nSimpleShell$ ");
         read_user_input(input);
         status = launch(input, status);
     } while (status);
@@ -140,7 +142,7 @@ void read_user_input(char* input) {  // take input
                 break;
             }
         }
-    } 
+    }
     else {
         perror("Error: Unable to take input ");
         exit(0);
@@ -151,10 +153,27 @@ int launch(char* command, int status) { // launches non piped commands
     if (strcmp(command, "exit") == 0) {
         printf("Shell ended");
         return 0;
-    }
-    else if (strcmp(command[0], "submit") == 0){
-
-    }
+    }else if (strncmp(command, "submit",6) == 0) {
+        char *cmd = command + 7;
+        trimWhiteSpace(cmd);
+        int pid = create_process_and_run(cmd, 0);
+        if (pid < 0) {
+            perror("Error: Failed to launch process");
+            return 1;
+        }
+        process new_process;
+        strncpy(new_process.cmd, cmd, sizeof(new_process.cmd) - 1);
+        new_process.cmd[sizeof(new_process.cmd) - 1] = '\0';
+        new_process.pid = pid;
+        new_process.state = 1;
+        new_process.priority = 1;
+        clock_gettime(CLOCK_MONOTONIC, &new_process.startTime);
+        sem_wait(&processQueueLock);
+        enqueue(&schedulerQ, new_process);
+        schedulerQ->rear++;
+        sem_post(&processQueueLock);
+        kill(getppid(), SIGUSR1);
+   }
     else {
         status = create_process_and_run(command, 0);
         if (status < 0) {
@@ -184,15 +203,16 @@ void trimWhiteSpace(char *str) {  // trimming white spaces
 
 int create_process_and_run(char* cmd, int bg) {  // create and run child process using fork
     int status = fork();
+    int pid;
     if (status < 0) {
         perror("Error: Could Not Fork");
-        exit(1);
+        exit(0);
     }
     if (status == 0) {
         if (bg) {
             if (setsid() == -1) {
                 perror("Error: Setsid Error");
-                exit(1);
+                exit(0);
             }
         }
         char* parameters[1024];
@@ -207,17 +227,16 @@ int create_process_and_run(char* cmd, int bg) {  // create and run child process
 
         if (execvp(parameters[0], parameters) == -1) {
             perror("Error: Execution Error");
-            exit(1);
+            exit(0);
         }
     }
     else {
-        int pid;
         if (!bg) {
             int status;
             pid = wait(&status);
-            if (pid == -1) {
+            if (pid < 0) {
                 perror("Error: Wait Failed");
-                exit(1);
+                exit(0);
             }
         }
     }
@@ -229,21 +248,29 @@ int main() {
     scanf("%d", &NCPU);
     printf("Enter the time quantum (TSLICE) in milliseconds: ");
     scanf("%d",&TSLICE);
-    
-    int shmid = shmget(IPC_PRIVATE, sizeof(struct ProcessQueue), 0666 | IPC_CREAT); // Create shared memory
+
+    if (sem_init(&schedulerSem, 0, 0) == -1 || sem_init(&processQueueLock, 0, 1) == -1){
+      perror("Error: Unable to initialize semaphore");
+      exit(0);
+    }
+
+    setupSignalHandler();
+
+    shmid = shmget(IPC_PRIVATE, sizeof(struct processQueue), 0666 | IPC_CREAT); // Create shared memory
     if (shmid < 0 ) {
         perror("Error: shmget failed");
         exit(0);
     }
 
-    struct ProcessQueue *scheduler_queue = shmat(shmid, NULL, 0); // Attach shared memory
-    if (scheduler_queue == (void*) -1) {
+    schedulerQ = (processQueue*)shmat(shmid, NULL, 0); // Attach shared memory
+    if (schedulerQ == (void*) -1) {
         perror("Error: shmat failed");
         exit(0);
     }
+    //schedulerQ = shmdt;
+    schedulerQ->rear = 0;
+    terminatedQ.rear = 0;
 
-    scheduler_queue.rear = -1; 
-    
     pid_t scheduler_pid = fork();
     if (scheduler_pid < 0) {
         perror("Error: Unable to fork scheduler process");
@@ -258,38 +285,48 @@ int main() {
             int activeProcesses = NCPU;
             int priorityLevel = 0;
 
-            for (int i = 0; i < schedulerQ.rear && activeProcesses > 0; i++) {
-                if (schedulerQ.processes[i].state == 1 && 
-                    (priorityLevel == 0 || priorityLevel == schedulerQ.processes[i].priority)) {
-                    
-                    kill(schedulerQ.processes[i].pid, SIGCONT); // Resume the selected process
-                    schedulerQ.processes[i].state = 0;  // Running
-                    
+            for (int i = 0; i <= schedulerQ->rear && activeProcesses > 0; i++) {
+                if (schedulerQ->processes[i].state == 1 &&
+                    (priorityLevel == 0 || priorityLevel == schedulerQ->processes[i].priority)) {
+
+                    kill(schedulerQ->processes[i].pid, SIGCONT); // Resume the selected process
+                    schedulerQ->processes[i].state = 0;  // Running
+
                     activeProcesses--; // Deduct from the count of available CPUs and set priority level
-                    priorityLevel = schedulerQ.processes[i].priority;
-                    
+                    priorityLevel = schedulerQ->processes[i].priority;
+
                     int adjustedTimeSlice = (priorityLevel != 0) ? TSLICE / priorityLevel : TSLICE; // Adjust TSLICE based on priority
                     usleep(adjustedTimeSlice * 1000);
 
-                    kill(schedulerQ.processes[i].pid, SIGSTOP); // Stop the process after its time slice expires
-                    clock_gettime(CLOCK_MONOTONIC, &schedulerQ.processes[i].endTime);
+                    kill(schedulerQ->processes[i].pid, SIGSTOP); // Stop the process after its time slice expires
+                    clock_gettime(CLOCK_MONOTONIC, &schedulerQ->processes[i].endTime);
 
                     // Calculate elapsed time
-                    long long elapsedMs = (schedulerQ.processes[i].endTime.tv_sec - schedulerQ.processes[i].startTime.tv_sec) * 1000 +(schedulerQ.processes[i].endTime.tv_nsec - schedulerQ.processes[i].startTime.tv_nsec) / 1000000;
+                    long long elapsedMs = (schedulerQ->processes[i].endTime.tv_sec - schedulerQ->processes[i].startTime.tv_sec) * 1000 +(schedulerQ->processes[i].endTime.tv_nsec - schedulerQ->processes[i].startTime.tv_nsec) / 1000000;
 
-                    schedulerQ.processes[i].execTime += elapsedMs;
-                    schedulerQ.processes[i].waitTime += elapsedMs * (schedulerQ.rear - 1);
+                    schedulerQ->processes[i].execTime += elapsedMs;
+                    schedulerQ->processes[i].waitTime += elapsedMs * (schedulerQ->rear - 1);
 
-                    schedulerQ.processes[i].state = 1; // Mark as waiting
+                    schedulerQ->processes[i].state = 1; // Mark as waiting
                 }
             }
             sem_post(&processQueueLock);
         }
     }
     else{
-        setupSignalHandler();
         shell_loop();
     }
 
+    printTermination();
+
+    if (shmdt(schedulerQ) == -1 || shmctl(shmid, IPC_RMID, NULL) == -1) {
+        perror("Error: Couldn't Release Shared Memory");
+    }
+
+    if (sem_destroy(&schedulerSem) == -1 || sem_destroy(&processQueueLock) == -1) {
+        perror("Error: Unable to Release Semaphore");
+    }
+
+    exit(0);
     return 0;
 }
