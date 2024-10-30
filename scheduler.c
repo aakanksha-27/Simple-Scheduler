@@ -161,15 +161,15 @@ int launch(char* command, int status) { // launches non piped commands
             perror("Error: Failed to launch process");
             return 1;
         }
-        process new_process;
-        strncpy(new_process.cmd, cmd, sizeof(new_process.cmd) - 1);
-        new_process.cmd[sizeof(new_process.cmd) - 1] = '\0';
-        new_process.pid = pid;
-        new_process.state = 1;
-        new_process.priority = 1;
-        clock_gettime(CLOCK_MONOTONIC, &new_process.startTime);
+        process newP;
+        strncpy(newP.cmd, cmd, sizeof(newP.cmd) - 1);
+        newP.cmd[sizeof(newP.cmd) - 1] = '\0';
+        newP.pid = pid;
+        newP.state = 1;
+        newP.priority = 1;
+        clock_gettime(CLOCK_MONOTONIC, &newP.startTime);
         sem_wait(&processQueueLock);
-        enqueue(&schedulerQ, new_process);
+        enqueue(&schedulerQ, newP);
         schedulerQ->rear++;
         sem_post(&processQueueLock);
         kill(getppid(), SIGUSR1);
