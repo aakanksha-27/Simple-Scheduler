@@ -1,6 +1,6 @@
-# OS-Assignment-3
+# Simple Scheduler
 
-Implementation (with BONUS)
+Implementation
 ---------------
 1. The OS has limited number of CPUs for multiple processes to run, but it gives the illusion that all processes are running at the same time.
 2. We take the number of CPUs and the TSLICE (time slice) as input, depending on which, the process scheduling is done.
